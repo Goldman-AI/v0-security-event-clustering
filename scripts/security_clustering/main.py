@@ -30,6 +30,14 @@ from src.clustering import (
     ClusterAnalyzer,
     find_optimal_clusters
 )
+from src.deep_clustering import (
+    DECModel,
+    IDECModel,
+    VaDEModel,
+    DeepClusteringNetwork,
+    DeepClusteringTrainer,
+    DeepClusteringConfig
+)
 from src.visualization import (
     reduce_dimensions,
     plot_clusters,
@@ -70,9 +78,21 @@ def parse_args():
     )
     parser.add_argument(
         '--clustering',
-        choices=['kmeans', 'dbscan', 'hdbscan', 'gmm'],
-        default='kmeans',
-        help='Clustering algorithm'
+        choices=['kmeans', 'dbscan', 'hdbscan', 'gmm', 'dec', 'idec', 'vade', 'dcn'],
+        default='dec',
+        help='Clustering algorithm (dec, idec, vade, dcn are deep learning methods)'
+    )
+    parser.add_argument(
+        '--clustering-epochs',
+        type=int,
+        default=100,
+        help='Number of epochs for deep clustering training'
+    )
+    parser.add_argument(
+        '--pretrain-epochs',
+        type=int,
+        default=50,
+        help='Number of epochs for autoencoder pretraining'
     )
     parser.add_argument(
         '--n-clusters',
@@ -280,25 +300,118 @@ def main():
     # =========================================================================
     print(f"\n[Step 6] Clustering with {args.clustering}...")
     
-    cluster_config = ClusteringConfig(
-        method=args.clustering,
-        n_clusters=args.n_clusters if args.n_clusters > 0 else 10,
-        eps=0.5,
-        min_samples=5,
-        min_cluster_size=10
-    )
+    deep_clustering_methods = ['dec', 'idec', 'vade', 'dcn']
     
-    clusterer = SecurityEventClusterer(cluster_config)
-    labels = clusterer.fit_predict(embeddings)
-    
-    print(f"  Number of clusters: {clusterer.n_clusters_}")
-    print(f"  Cluster sizes: {clusterer.get_cluster_sizes()}")
-    
-    if clusterer.metrics_:
-        print(f"  Metrics:")
-        for key, value in clusterer.metrics_.items():
-            if value is not None:
-                print(f"    {key}: {value:.4f}" if isinstance(value, float) else f"    {key}: {value}")
+    if args.clustering in deep_clustering_methods:
+        # Use Deep Learning Clustering
+        n_clusters = args.n_clusters if args.n_clusters > 0 else 10
+        
+        deep_config = DeepClusteringConfig(
+            input_dim=input_dim,
+            hidden_dims=[512, 256, 128],
+            latent_dim=args.latent_dim,
+            n_clusters=n_clusters,
+            pretrain_epochs=args.pretrain_epochs,
+            clustering_epochs=args.clustering_epochs,
+            batch_size=args.batch_size,
+            learning_rate=1e-3,
+            device=args.device
+        )
+        
+        # Create deep clustering model
+        if args.clustering == 'dec':
+            deep_model = DECModel(deep_config)
+            print("  Using DEC (Deep Embedded Clustering)")
+        elif args.clustering == 'idec':
+            deep_model = IDECModel(deep_config)
+            print("  Using IDEC (Improved Deep Embedded Clustering)")
+        elif args.clustering == 'vade':
+            deep_model = VaDEModel(deep_config)
+            print("  Using VaDE (Variational Deep Embedding)")
+        elif args.clustering == 'dcn':
+            deep_model = DeepClusteringNetwork(deep_config)
+            print("  Using DCN (Deep Clustering Network)")
+        
+        # Create trainer and train
+        deep_trainer = DeepClusteringTrainer(deep_model, deep_config)
+        print(f"  Using device: {deep_trainer.device}")
+        
+        print(f"\n  Phase 1: Pretraining autoencoder ({args.pretrain_epochs} epochs)...")
+        pretrain_history = deep_trainer.pretrain(X)
+        
+        print(f"\n  Phase 2: Deep clustering ({args.clustering_epochs} epochs)...")
+        cluster_history = deep_trainer.train_clustering(X)
+        
+        # Get cluster labels
+        labels = deep_trainer.predict(X)
+        embeddings = deep_trainer.get_embeddings(X)
+        
+        # Calculate metrics
+        n_clusters_found = len(np.unique(labels[labels >= 0]))
+        cluster_sizes = {int(k): int(v) for k, v in zip(*np.unique(labels, return_counts=True))}
+        
+        print(f"\n  Deep Clustering Results:")
+        print(f"    Number of clusters: {n_clusters_found}")
+        print(f"    Cluster sizes: {cluster_sizes}")
+        
+        # Save deep clustering model
+        deep_model_path = os.path.join(args.output_dir, f'{args.clustering}_deep_model.pt')
+        deep_trainer.save_model(deep_model_path)
+        print(f"    Model saved to {deep_model_path}")
+        
+        # Plot training history
+        if pretrain_history or cluster_history:
+            combined_history = {
+                'pretrain_loss': pretrain_history.get('loss', []),
+                'cluster_loss': cluster_history.get('loss', [])
+            }
+            history_plot = os.path.join(args.output_dir, 'deep_clustering_history.png')
+            
+            fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+            if combined_history['pretrain_loss']:
+                axes[0].plot(combined_history['pretrain_loss'])
+                axes[0].set_title('Pretraining Loss')
+                axes[0].set_xlabel('Epoch')
+                axes[0].set_ylabel('Loss')
+            if combined_history['cluster_loss']:
+                axes[1].plot(combined_history['cluster_loss'])
+                axes[1].set_title('Clustering Loss')
+                axes[1].set_xlabel('Epoch')
+                axes[1].set_ylabel('Loss')
+            plt.tight_layout()
+            plt.savefig(history_plot, dpi=150)
+            plt.close()
+        
+        # Set metrics for reporting
+        clusterer = None
+        cluster_metrics = {
+            'method': args.clustering,
+            'n_clusters': n_clusters_found
+        }
+        
+    else:
+        # Use Traditional ML Clustering on embeddings
+        cluster_config = ClusteringConfig(
+            method=args.clustering,
+            n_clusters=args.n_clusters if args.n_clusters > 0 else 10,
+            eps=0.5,
+            min_samples=5,
+            min_cluster_size=10
+        )
+        
+        clusterer = SecurityEventClusterer(cluster_config)
+        labels = clusterer.fit_predict(embeddings)
+        
+        print(f"  Number of clusters: {clusterer.n_clusters_}")
+        print(f"  Cluster sizes: {clusterer.get_cluster_sizes()}")
+        
+        cluster_metrics = clusterer.metrics_
+        
+        if cluster_metrics:
+            print(f"  Metrics:")
+            for key, value in cluster_metrics.items():
+                if value is not None:
+                    print(f"    {key}: {value:.4f}" if isinstance(value, float) else f"    {key}: {value}")
     
     # Save labels
     labels_path = os.path.join(args.output_dir, 'cluster_labels.npy')
@@ -358,7 +471,7 @@ def main():
     
     # Create text report
     report_path = os.path.join(args.output_dir, 'cluster_report.txt')
-    create_cluster_report(summaries, clusterer.metrics_, report_path)
+    create_cluster_report(summaries, cluster_metrics, report_path)
     
     # =========================================================================
     # Summary
@@ -377,7 +490,9 @@ def main():
     print("  - cluster_report.txt")
     
     print(f"\nTotal events: {len(df)}")
-    print(f"Clusters found: {clusterer.n_clusters_}")
+    print(f"Clustering method: {args.clustering}")
+    n_clusters_final = clusterer.n_clusters_ if clusterer else len(np.unique(labels[labels >= 0]))
+    print(f"Clusters found: {n_clusters_final}")
     if anomalous:
         print(f"Anomalous clusters: {len(anomalous)}")
 
