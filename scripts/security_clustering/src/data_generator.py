@@ -144,6 +144,8 @@ class SecurityEventGenerator:
         if seed is not None:
             random.seed(seed)
             np.random.seed(seed)
+        self._event_labels = []  # Store pattern labels for ground truth
+        self._pattern_to_id = {pattern: i for i, pattern in enumerate(self.ATTACK_PATTERNS.keys())}
     
     def _generate_internal_ip(self) -> str:
         prefix, start, end = random.choice(self.INTERNAL_IP_RANGES)
@@ -271,13 +273,20 @@ class SecurityEventGenerator:
                 0.10,  # vpn_activity
             ]
         
+        self._event_labels = []  # Reset labels for new dataset
+        
         for _ in range(n_events):
             pattern = random.choices(patterns, weights=weights)[0]
             timestamp = self._generate_timestamp(start_date, end_date)
             event = self.generate_event(pattern=pattern, timestamp=timestamp)
             events.append(event)
+            self._event_labels.append(self._pattern_to_id[pattern])
         
         return events
+    
+    def get_labels(self, events: List[str] = None) -> np.ndarray:
+        """Get ground truth labels for generated events"""
+        return np.array(self._event_labels)
     
     def save_dataset(self, events: List[str], file_path: str):
         """Save events to file"""
